@@ -1,0 +1,247 @@
+const passModel = require('../models/passModel')
+const appointmentModel = require('../models/appointmentModel')
+const visitorModel = require('../models/visitorModel')
+const userModel = require('../models/userModel')
+const mongoose = require('mongoose')
+const QRCode = require('qrcode')
+const PDFDocument = require('pdfkit')
+const nodemailer = require('nodemailer')
+const twilio = require('twilio')
+
+// Mock/Live Nodemailer Transporter Configuration
+const createTransporter = async () => {
+    const emailUser = process.env.EMAIL_USER ? process.env.EMAIL_USER.trim() : null;
+    const emailPass = process.env.EMAIL_PASS ? process.env.EMAIL_PASS.trim() : null;
+
+    if (process.env.EMAIL_HOST && emailUser && emailPass) {
+        return nodemailer.createTransport({
+            host: process.env.EMAIL_HOST.trim(),
+            port: process.env.EMAIL_PORT ? Number(process.env.EMAIL_PORT) : 587,
+            secure: process.env.EMAIL_SECURE === 'true',
+            auth: {
+                user: emailUser,
+                pass: emailPass
+            }
+        })
+    }
+
+    if (emailUser && emailPass) {
+        return nodemailer.createTransport({
+            host: 'smtp.gmail.com',
+            port: 587,
+            secure: false,
+            auth: {
+                user: emailUser,
+                pass: emailPass
+            }
+        })
+    }
+
+    const testAccount = await nodemailer.createTestAccount()
+    return nodemailer.createTransport({
+        host: 'smtp.ethereal.email',
+        port: 587,
+        secure: false,
+        auth: {
+            user: testAccount.user,
+            pass: testAccount.pass
+        }
+    })
+}
+
+const generatePDFBase64 = (visitor, validUntil, qrCodeDataUrl, hostName = 'Security Desk', purpose = 'Official Visit') => {
+    return new Promise((resolve) => {
+        const doc = new PDFDocument({ size: [250, 420], margin: 0 })
+        const buffers = []
+
+        doc.on('data', buffers.push.bind(buffers))
+        doc.on('end', () => {
+            const pdfData = Buffer.concat(buffers)
+            resolve(`data:application/pdf;base64,${pdfData.toString('base64')}`)
+        })
+        
+        doc.rect(0, 0, 250, 55).fill('#1e3a8a')
+        doc.fillColor('#ffffff').fontSize(16).text('VISITOR PASS', 0, 20, { align: 'center' })
+
+        // Name
+        doc.fillColor('#111827').fontSize(16).text(visitor.name, 10, 70, { align: 'center', width: 230 })
+
+        // QR Code
+        const qrImageBuffer = Buffer.from(qrCodeDataUrl.split(',')[1], 'base64')
+        doc.image(qrImageBuffer, 55, 95, { width: 140 })
+        
+        doc.fillColor('#4b5563').fontSize(10).text(`Purpose: ${purpose}`, 10, 245, { align: 'center', width: 230 })
+        doc.fillColor('#1e3a8a').fontSize(11).text(`Host: ${hostName}`, 10, 265, { align: 'center', width: 230 })
+        doc.fillColor('#6b7280').fontSize(9).text('Valid Until:', 0, 290, { align: 'center' })
+        doc.fillColor('#b91c1c').fontSize(11).text(new Date(validUntil).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }), 0, 305, { align: 'center' })
+
+        doc.end()
+    })
+}
+
+exports.generatePass = async(req,res)=>{
+    const {appointmentId} = req.body;
+
+    try{
+        if(!mongoose.Types.ObjectId.isValid(appointmentId)){
+            return res.status(400).json({error: `${appointmentId} Appointment not found`})
+        }        
+        const appointment = await appointmentModel.findById(appointmentId).populate('visitorId').populate('hostId', 'name email')
+        if(!appointment){
+            return res.status(400).json({error: 'Appointment not found'})
+        }
+        if(!(appointment.status == 'Approved')){
+            return res.status(400).json({error: 'Cannot generate pass: Appointment is not approved.'})
+        }
+        const qrData = JSON.stringify({appointmentId: appointment._id})
+
+        const qrCode = await QRCode.toDataURL(qrData)
+        const scheduledDate = new Date(appointment.dateTime || appointment.date)
+        const validUntil = new Date(scheduledDate)
+        validUntil.setHours(23, 59, 59, 999)
+
+        const hostName = appointment.hostName || appointment.hostId?.name || 'Security Desk'
+        const purpose = appointment.purpose || appointment.visitorId?.purpose || 'Official Visit'
+
+        const pdfUrl = await generatePDFBase64(appointment.visitorId, validUntil, qrCode, hostName, purpose)
+
+        const pass = await passModel.create({ 
+            appointmentId, 
+            visitorId: appointment.visitorId?._id,
+            hostName,
+            purpose,
+            qrCode, 
+            pdfUrl, 
+            validUntil,
+            status: 'Issued'
+        })
+
+        // Send Email Notification to Visitor
+        try {
+            const transporter = await createTransporter()
+            const pdfBase64Buffer = Buffer.from(pdfUrl.split(',')[1], 'base64')
+            const appointmentTimeFormatted = new Date(appointment.dateTime).toLocaleString('en-US', {
+                dateStyle: 'full',
+                timeStyle: 'short'
+            })
+
+            const mailOptions = {
+                from: process.env.EMAIL_FROM || (process.env.EMAIL_USER ? `"VPMS Security Desk" <${process.env.EMAIL_USER}>` : '"VPMS Security Desk" <no-reply@vpms.local>'),
+                to: appointment.visitorId.email,
+                subject: 'Your Visitor Pass is Approved - VPMS',
+                html: `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1e293b; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">
+                        <div style="background-color: #1e3a8a; padding: 24px; text-align: center;">
+                            <h1 style="color: #ffffff; margin: 0; font-size: 22px; font-weight: 700;">Visitor Pass Approved</h1>
+                        </div>
+                        <div style="padding: 24px; background-color: #ffffff;">
+                            <p style="font-size: 16px; margin-bottom: 16px;">Hello <strong>${appointment.visitorId.name}</strong>,</p>
+                            <p style="font-size: 14px; line-height: 1.6; color: #475569;">
+                                We are pleased to inform you that your visitor pass request has been <strong>approved</strong>.
+                            </p>
+                            
+                            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 16px; margin: 20px 0;">
+                                <h3 style="margin-top: 0; color: #1e3a8a; font-size: 15px;">Appointment Details</h3>
+                                <p style="margin: 6px 0; font-size: 14px;"><strong>Host:</strong> ${hostName}</p>
+                                <p style="margin: 6px 0; font-size: 14px;"><strong>Appointment Time:</strong> ${appointmentTimeFormatted}</p>
+                                <p style="margin: 6px 0; font-size: 14px;"><strong>Purpose of Visit:</strong> ${purpose}</p>
+                                <p style="margin: 6px 0; font-size: 14px;"><strong>Pass Valid Until:</strong> ${new Date(validUntil).toLocaleString()}</p>
+                            </div>
+
+                            <p style="font-size: 14px; line-height: 1.6; color: #475569;">
+                                📄 <strong>Your digital visitor pass PDF is attached to this email.</strong> Please have it ready on your device or present the attached QR code at the security reception desk upon your arrival.
+                            </p>
+                            
+                            <p style="font-size: 13px; color: #64748b; margin-top: 24px; border-top: 1px solid #f1f5f9; padding-top: 16px;">
+                                If you need to reschedule or have any security inquiries, please contact the front desk.
+                            </p>
+                        </div>
+                        <div style="background-color: #f8fafc; padding: 14px; text-align: center; font-size: 12px; color: #94a3b8; border-top: 1px solid #e2e8f0;">
+                            &copy; ${new Date().getFullYear()} Visitor Pass Management System (VPMS). All rights reserved.
+                        </div>
+                    </div>
+                `,
+                attachments: [
+                    {
+                        filename: `Visitor_Pass_${appointment.visitorId.name.replace(/\s+/g, '_')}.pdf`,
+                        content: pdfBase64Buffer,
+                        contentType: 'application/pdf'
+                    }
+                ]
+            }
+
+            const info = await transporter.sendMail(mailOptions)
+            console.log('Pass notification email sent successfully:', info.messageId)
+            const previewUrl = nodemailer.getTestMessageUrl(info)
+            if (previewUrl) {
+                console.log('Preview Ethereal Email URL:', previewUrl)
+            }
+        } catch (emailError) {
+            console.error('Failed to send visitor pass email:', emailError)
+        }
+
+        // Send SMS Notification to Visitor via Twilio (Isolated Guardrail)
+        try {
+            const accountSid = process.env.TWILIO_ACCOUNT_SID ? process.env.TWILIO_ACCOUNT_SID.trim() : null;
+            const authToken = process.env.TWILIO_AUTH_TOKEN ? process.env.TWILIO_AUTH_TOKEN.trim() : null;
+            const twilioPhone = process.env.TWILIO_PHONE_NUMBER ? process.env.TWILIO_PHONE_NUMBER.trim() : null;
+            let visitorPhone = appointment.visitorId?.phone ? String(appointment.visitorId.phone).trim() : null;
+
+            if (accountSid && authToken && twilioPhone && visitorPhone) {
+                // Ensure E.164 country code format (+91 default)
+                if (!visitorPhone.startsWith('+')) {
+                    visitorPhone = `+91${visitorPhone}`;
+                }
+
+                const client = twilio(accountSid, authToken);
+                const message = await client.messages.create({
+                    body: `Hello ${appointment.visitorId.name}, your visitor pass for VPMS has been approved. Valid until: ${new Date(validUntil).toLocaleString()}. Please check your email for the pass PDF and QR code.`,
+                    from: twilioPhone,
+                    to: visitorPhone
+                });
+                console.log('Twilio SMS sent successfully, SID:', message.sid);
+            } else {
+                console.log('Twilio SMS skipped: missing environment variables or visitor phone number.');
+            }
+        } catch (smsError) {
+            console.error('Failed to send Twilio SMS notification:', smsError.message);
+        }
+
+        const populatedPass = await passModel.findById(pass._id).populate({
+            path: 'appointmentId',
+            populate: [
+                { path: 'visitorId' },
+                { path: 'hostId', select: 'name email' }
+            ]
+        })
+
+        res.status(201).json(populatedPass || pass)
+    }
+    catch(error){
+        res.status(400).json({error: error.message})
+    }
+}
+
+exports.getPasses = async (req, res) => {
+    try {
+        const passes = await passModel.find({ status: { $ne: 'Checked Out' } }).sort({ createdAt: -1 });
+
+        const resolvedPasses = await Promise.all(
+            passes.map(async (pass) => {
+                const appointment = await appointmentModel
+                    .findById(pass.appointmentId)
+                    .populate('visitorId')
+                    .populate('hostId', 'name email');
+
+                return {
+                    ...(pass.toObject ? pass.toObject() : pass),
+                    appointmentId: appointment || pass.appointmentId
+                };
+            })
+        );
+
+        res.status(200).json(resolvedPasses);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+};
