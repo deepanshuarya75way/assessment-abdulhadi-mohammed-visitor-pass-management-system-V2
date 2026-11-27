@@ -335,7 +335,7 @@ exports.preRegisterVisitor = async(req,res)=>{
             purpose: visitorPurpose,
             meetingRoom: room,
             reservationCode,
-            isPreApproved: true, // this
+            isPreApproved: true, // this s
             qrCode,
             pdfUrl,
             validUntil,

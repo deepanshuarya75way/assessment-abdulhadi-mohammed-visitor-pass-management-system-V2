@@ -4,6 +4,7 @@ import { QrReader } from "react-qr-reader";
 import { useAuthContext } from "../hooks/useAuthContext";
 import { usePassContext } from "../hooks/usePassContext";
 import { useGeneratePass } from "../hooks/useGeneratePass";
+import { BASE_URL } from '../config'
 
 const AdminDashboard = () => {
   const { user } = useAuthContext();
@@ -27,7 +28,22 @@ const AdminDashboard = () => {
 
   // QR Scanner States
   const [showScanner, setShowScanner] = useState(false);
-  const isScanningRef = useRef(false);
+  const isScanningRef = useRef(null);
+
+  // pre approval
+  const [preForm, setPreForm] = useState({
+    name: "",
+    email: "",
+    phone: "",
+    purpose: "",
+    dateTime: "",
+    meetingRoom: "",
+  })
+  const [preRegistering, setPreRegistering] = useState(false)
+  const [createdPrePass, setCreatedPrePass] = useState(null)
+  const [searchQuery, setSearchQuery] = useState("")
+  const [arrivalAlert, setArrivalAlert] = useState(null)
+  const seenCheckedInIdsRef = useRef(null)
 
   // Fetch Pending Requests (Admin/Host only)
   const fetchPending = async () => {
@@ -35,7 +51,8 @@ const AdminDashboard = () => {
     setLoadingPending(true);
     try {
       const response = await fetch(
-        "https://visitor-pass-management-system-nq1z.onrender.com/api/appointments/pending",
+        // replacing this so it hits locallhost
+        `${BASE_URL}/api/appointments/pending`,
         {
           headers: {
             Authorization: `Bearer ${user.token}`,
@@ -59,7 +76,7 @@ const AdminDashboard = () => {
     setLoadingPasses(true);
     try {
       const response = await fetch(
-        "https://visitor-pass-management-system-nq1z.onrender.com/api/passes",
+        `${BASE_URL}/api/passes`,
         {
           headers: {
             Authorization: `Bearer ${user.token}`,
@@ -88,6 +105,39 @@ const AdminDashboard = () => {
       fetchPasses();
     }
   }, [user, canApprove]);
+
+  useEffect(() =>{
+    if(!user) return
+    const interval = setInterval(()=>{
+      fetchPasses()
+    }, 5000)
+    return () => clearInterval(interval)
+  },[user])
+
+  useEffect(()=>{
+    if(!passes) return
+    const checkedInPre = passes.filter(
+      (p) => p.isPreApproved && p.status === "Checked In"
+    )
+
+    if(seenCheckedInIdsRef.current === null){
+      seenCheckedInIdsRef.current = new Set(checkedInPre.map((p) => p._id))
+      return
+    }
+
+    for(const p of checkedInPre){
+      if(!seenCheckedInIdsRef.current.has(p._id)){
+        seenCheckedInIdsRef.current.add(p._id)
+        const guest = p.appointmentId?.visitorId || p.visitorId;
+        setArrivalAlert({
+          id: p._id,
+          name: guest?.name || "Pre-Approved Guest",
+          code: p.reservationCode || "",
+          room: p.meetingRoom || "Main Conference Room",
+        })
+      }
+    }
+  }, [passes])
 
   // Clean up camera stream
   const stopCameraTracks = () => {
@@ -121,12 +171,71 @@ const AdminDashboard = () => {
     isScanningRef.current = true;
   };
 
+// pre approval
+const handlePreRegister = async(e) => {
+  e.preventDefault();
+  setPreRegistering(true)
+  setCreatedPrePass(null)
+
+  try{
+    const response = await fetch(
+      `${BASE_URL}/api/passes/pre-register`,{
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${user.token}`,
+        },
+        body: JSON.stringify({
+          ...preForm,
+          dateTime: new Date(preForm.dateTime).toISOString(),
+        })
+      })
+      const json = await response.json();
+
+      if(response.ok){
+        setCreatedPrePass(json)
+        setPreForm({
+          name: "",
+          email: "",
+          phone: "",
+          purpose: "",
+          dateTime: "",
+          meetingRoom: "",
+        })
+        fetchPasses()
+        toast.success(`Pre-Approved! Code: ${json.reservationCode}`)
+      }
+      else{
+        toast.error(json.error || "Pre-Registration Failed")
+      }
+  }catch(error){
+    toast.error("Error while pre-registering")
+  }
+  finally{
+    setPreRegistering(false)
+  }
+}
+
+const handleDownloadICS = (icsContent, code) => {
+  if(!icsContent) return
+  const blob = new Blob([icsContent], { type: "text/calendar; charset=utf-8"})
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = url
+  link.download = `Invite_${code || "VPMS"}.ics`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+  toast.success("Calendar invite downloaded")
+}
+
   // Status Update & Pass Generation Trigger
   const handleStatusUpdate = async (id, newStatus) => {
     setProcessingId(id);
     try {
       const response = await fetch(
-        `https://visitor-pass-management-system-nq1z.onrender.com/api/appointments/${id}`,
+        `${BASE_URL}/api/appointments/${id}`,
         {
           method: "PATCH",
           headers: {
@@ -176,7 +285,7 @@ const AdminDashboard = () => {
     setProcessingLogId(passId);
     try {
       const response = await fetch(
-        "https://visitor-pass-management-system-nq1z.onrender.com/api/logs/check-in",
+        `${BASE_URL}/api/logs/check-in`,
         {
           method: "POST",
           headers: {
@@ -211,7 +320,7 @@ const AdminDashboard = () => {
     setProcessingLogId(passId);
     try {
       const response = await fetch(
-        "https://visitor-pass-management-system-nq1z.onrender.com/api/logs/check-out",
+        `${BASE_URL}/api/logs/check-out`,
         {
           method: "PATCH",
           headers: {
@@ -261,8 +370,30 @@ const AdminDashboard = () => {
     toast.success(`${filename} saved!`);
   };
 
+
+  const filteredPasses = (passes || []).filter((pass)=>{
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return true
+    const visitor = pass.appointmentId?.visitorId || pass.visitorId
+    const name = (visitor?.name || "").toLowerCase()
+    const phone = (visitor?.phone || "").toLowerCase()
+    const code = (pass.reservationCode || "").toLowerCase()
+    return name.includes(q) || phone.includes(q) || code.includes(q)
+  })
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
+      {canApprove && setArrivalAlert && (
+        <div className="mb-6 bg-emerald-600 text-white rounded-2xl p-4 shadow-md flex items-center justify-between gap-4">
+          <div>
+            <p>{arrivalAlert.name} {arrivalAlert.code ? `(${arrivalAlert.code})` : ""} has checked in.</p>
+          </div>
+          <button onClick={()=> setArrivalAlert(null)} className="bg-white/20 hover:bg-white/30 text-white text-xs font-semibold px-3 py-1.5 rounded-lg cursor-pointer">
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {showScanner && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl overflow-hidden flex flex-col">
@@ -390,6 +521,17 @@ const AdminDashboard = () => {
             {passes ? passes.length : 0}
           </span>
         </button>
+        {canApprove && (
+          <button onClick={() => setActiveTab("preregister")}
+          className={`pb-3 px-2 text-sm font-semibold border-b-2 transition-colors cursor-pointer ${
+              activeTab === "preregister"
+                ? "border-blue-600 text-blue-600"
+                : "border-transparent text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            Pre Register Guest
+          </button>
+        )}
       </div>
 
       {canApprove && activeTab === "pending" && (
@@ -519,6 +661,131 @@ const AdminDashboard = () => {
         </div>
       )}
 
+            {canApprove && activeTab === "preregister" && (
+        <div className="max-w-xl mx-auto bg-white rounded-2xl border border-slate-200 p-6 shadow-xs">
+          <h2 className="text-lg font-bold text-slate-900 mb-3">
+            Pre-Register Expected Guest
+          </h2>
+
+          <form onSubmit={handlePreRegister} className="space-y-3">
+            <input
+              type="text"
+              placeholder="Full Name"
+              required
+              value={preForm.name}
+              onChange={(e) => setPreForm({ ...preForm, name: e.target.value })}
+              className="w-full px-3.5 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+            />
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <input
+                type="email"
+                placeholder="Email Address"
+                required
+                value={preForm.email}
+                onChange={(e) => setPreForm({ ...preForm, email: e.target.value })}
+                className="w-full px-3.5 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+              />
+              <input
+                type="tel"
+                placeholder="Phone Number"
+                required
+                value={preForm.phone}
+                onChange={(e) => setPreForm({ ...preForm, phone: e.target.value })}
+                className="w-full px-3.5 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <input
+                type="datetime-local"
+                required
+                value={preForm.dateTime}
+                onChange={(e) => setPreForm({ ...preForm, dateTime: e.target.value })}
+                className="w-full px-3.5 py-2 border border-slate-200 rounded-lg text-sm text-slate-700 focus:outline-none focus:border-blue-500"
+              />
+              <input
+                type="text"
+                placeholder="Meeting Room (e.g., Boardroom A)"
+                value={preForm.meetingRoom}
+                onChange={(e) => setPreForm({ ...preForm, meetingRoom: e.target.value })}
+                className="w-full px-3.5 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            <input
+              type="text"
+              placeholder="Purpose of Visit"
+              required
+              value={preForm.purpose}
+              onChange={(e) => setPreForm({ ...preForm, purpose: e.target.value })}
+              className="w-full px-3.5 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+            />
+
+            <button
+              type="submit"
+              disabled={preRegistering}
+              className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-semibold text-sm py-2.5 rounded-xl transition-colors cursor-pointer shadow-xs mt-2"
+            >
+              {preRegistering ? "Issuing Pre-Approved Pass..." : "Pre-Register & Issue Pass"}
+            </button>
+          </form>
+
+          {createdPrePass && (
+            <div className="mt-6 pt-5 border-t border-slate-100">
+              <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-emerald-700">
+                    Pass Ready
+                  </span>
+                  <span className="text-xs font-mono font-bold bg-white border border-emerald-200 text-slate-800 px-2.5 py-1 rounded-md">
+                    {createdPrePass.reservationCode}
+                  </span>
+                </div>
+
+                <p className="text-xs text-slate-600">
+                  Sent PDF pass & calendar invite to{" "}
+                  <strong className="text-slate-800">
+                    {createdPrePass.appointmentId?.visitorId?.email || "visitor"}
+                  </strong>
+                  .
+                </p>
+
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const blob = new Blob([createdPrePass.calendarInvite], {
+                        type: "text/calendar;charset=utf-8",
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement("a");
+                      link.href = url;
+                      link.download = `Invite_${createdPrePass.reservationCode}.ics`;
+                      document.body.appendChild(link);
+                      link.click();
+                      document.body.removeChild(link);
+                      URL.revokeObjectURL(url);
+                      toast.success("Calendar invite downloaded!");
+                    }}
+                    className="bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs py-2 px-3 rounded-lg transition-colors cursor-pointer"
+                  >
+                    Download Calendar (.ics)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenPDF(createdPrePass.pdfUrl)}
+                    className="bg-white hover:bg-slate-50 text-blue-700 border border-blue-200 font-semibold text-xs py-2 px-3 rounded-lg transition-colors cursor-pointer"
+                  >
+                    View Pass PDF
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {activeTab === "active" && (
         <div>
           {loadingPasses ? (
@@ -538,8 +805,18 @@ const AdminDashboard = () => {
               </p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {passes.map((pass) => {
+            <div>
+              <div className="mb-5" >
+                <input 
+                  type="text"
+                  value ={searchQuery}
+                  onChange={(e) = setSearchQuery(e.target.value)}
+                  placeholder = "Search by name, code, or phone..."
+                  className="w-full sm:max-w-md px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-blue-500"
+                />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {filteredPasses.map ((pass) => {
                 const visitor = pass.appointmentId?.visitorId || pass.visitorId;
                 const host =
                   pass.hostName ||
@@ -577,6 +854,11 @@ const AdminDashboard = () => {
                         <span className="text-[11px] text-slate-400">
                           {new Date(pass.createdAt).toLocaleDateString()}
                         </span>
+                        {pass.reservationCode && (
+                          <span className="text-[11px] font-bold bg-indigo-700 border border-indigo-200 px-2 py-0.5 rounded"> 
+                          {pass.reservationCode}
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-3 mb-4">
@@ -709,6 +991,7 @@ const AdminDashboard = () => {
                   </div>
                 );
               })}
+            </div>
             </div>
           )}
         </div>
