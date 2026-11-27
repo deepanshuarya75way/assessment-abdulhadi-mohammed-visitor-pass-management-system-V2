@@ -1,6 +1,6 @@
 const express = require('express')
 const requireAuth = require('../middleware/requireAuth')
-const {generatePass, getPasses} = require('../controller/passController')
+const {generatePass, getPasses, preRegisterVisitor} = require('../controller/passController')
 const requireRole = require('../middleware/requireRole')
 const passRouter = express.Router()
 passRouter.use(requireAuth)
@@ -14,6 +14,8 @@ passRouter.use(requireAuth)
  */
 passRouter.post('/', requireRole('Admin', 'Employee'), generatePass)
 
+
+passRouter.post('/pre-register', requireRole('Admin', 'Employee'), preRegisterVisitor)
 /**
  * Route:       /api/passes/
  * Method:      GET

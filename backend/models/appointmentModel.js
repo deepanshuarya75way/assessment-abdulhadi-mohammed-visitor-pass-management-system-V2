@@ -19,6 +19,10 @@ const appointmentSchema = new Schema({
         type: String,
         default: 'Official Visit'
     },
+    meetingRoom:{
+        type: String,
+        default: 'Main Conference Room'
+    },
     status:{
         type: String,
         enum: ['Pending', 'Approved', 'Rejected'],

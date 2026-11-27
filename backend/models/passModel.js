@@ -16,6 +16,20 @@ const passSchema = new Schema({
     purpose:{
         type: String,
     },
+    // unique code to lookup 
+    reservationCode:{
+        type: String,
+        unique: true,
+        sparse: true
+    },
+    meetingRoom:{
+        type: String,
+    },
+    isPreApproved:{
+        type: Boolean,
+        default: false
+    },
+
     qrCode:{
         type: String,
         required: true,

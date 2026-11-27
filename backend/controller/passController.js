@@ -245,3 +245,145 @@ exports.getPasses = async (req, res) => {
         res.status(400).json({ error: error.message });
     }
 };
+
+
+const buildCalenderInvite = ({
+    uid, 
+    startDate,
+    endDate,
+    summary,
+    description,
+    location
+}) => {
+    const formatDate = (d) => new Date(d).toISOString().replace(/[-:]/g, '').split('.')[0]+'Z'
+    return [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//VPMS//Pre-Approved Visitor Pass//EN',
+        'METHOD:REQUEST',
+        'BEGIN:VEVENT',
+        `UID:${uid}@vpms.local`,
+        `DTSTAMP:${formatDate(new Date())}`,
+        `DTSTART:${formatDate(startDate)}`,
+        `DTEND:${formatDate(endDate)}`,
+        `SUMMARY:${summary}`,
+        `DESCRIPTION:${description}`,
+        `LOCATION:${location}`,
+        'STATUS:CONFIRMED',
+        'END:VEVENT',
+        'END:VCALENDAR'
+    ].join('\r\n')
+}
+
+exports.preRegisterVisitor = async(req,res)=>{
+    const { name, email, phone, purpose, dateTime, meetingRoom} = req.body;
+
+    if( !name || !email || !phone || !purpose || !dateTime){
+        return res.status(400).json({error: 'Name, email, phone and date are required'})
+    }
+
+    try{
+        const normalizedEmail = email.toLowerCase().trim();
+        let visitor = await visitorModel.findOne({email: normalizedEmail})
+
+        if(visitor){
+            visitor.name = name;
+            visitor.phone = phone;
+            if(purpose){
+                visitor.purpose = purpose
+            }
+            await visitor.save()
+        }else{
+            visitor = await visitorModel.create({
+                name,
+                email: normalizedEmail,
+                phone,
+                purpose: purpose || 'Scheduled Meeting',
+                photo_url: 'https://dummyimage.com/150x150'
+            })
+        }
+        
+
+        const hostUser = await userModel.findById(req.user._id).select('name email')
+        const hostName = hostUser?.name || 'Host Employee'
+        const room = meetingRoom?.trim() || 'Main Conference Room'
+        const visitorPurpose = purpose || 'Scheduled Meeting'
+        const scheduledDate = new Date(dateTime)
+
+        const appointment = await appointmentModel.create({
+            visitorId: visitor._id,
+            hostId: req.user._id,
+            hostName,
+            purpose: visitorPurpose,
+            meetingRoom: room,
+            dateTime: scheduledDate,
+            status: 'Approved'
+        })
+
+        const reservationCode = `VPMS-${Math.random().toString(36).substring(2,8).toUpperCase()}`
+        const qrData = JSON.stringify({appointmentId: appointment._id, reservationCode})
+        const qrCode = await QRCode.toDataURL(qrData)
+
+        const validUntil = new Date(scheduledDate)
+        validUntil.setHours(23, 59, 59, 999)
+        const pdfUrl = await generatePDFBase64(visitor, validUntil, qrCode, `${hostName} (${room}) `, visitorPurpose)
+
+        const pass = await passModel.create({
+            appointmentId: appointment._id,
+            visitorId: visitor._id,
+            hostName,
+            purpose: visitorPurpose,
+            meetingRoom: room,
+            reservationCode,
+            isPreApproved: true, // this
+            qrCode,
+            pdfUrl,
+            validUntil,
+            status: 'Issued'
+        })
+
+        const endDate = new Date(scheduledDate.getTime() + 24 * 60 * 60 * 1000)
+        const calendarInvite = buildCalenderInvite({
+            uid: reservationCode,
+            startDate: scheduledDate,
+            endDate,
+            summary: `Visitor Pass ${visitorPurpose} with ${hostName}`,
+            description: `Reservation Code: ${reservationCode} with ${hostName} | Room: ${room}`,
+            location: room
+        })
+
+        try{
+            const transporter = await createTransporter()
+            const pdfBuffer = Buffer.from(pdfUrl.split(',')[1], 'base64')
+            await transporter.sendMail({
+                from: process.env.EMAIL_FROM || (process.env.EMAIL_USER ? `"VPMS Security Desk" <${process.env.EMAIL_USER}>` : '"VPMS Security Desk" <no-reply@vpms.local>'),
+                to: visitor.email,
+                subject: `Pre-Approved Visitor Pass [${reservationCode}] - VPMS`,
+                html: `<p> Hello <strong>${visitor.name}</strong>,</p><p>You have been pre-approved by <strong>${hostName}</strong>.</p><p><strong>Reservation Code: </strong> ${reservationCode}<br/> <strong> Meeting Room: </strong> ${room}<br/> <strong> Time: </strong> ${scheduledDate.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</p>`,
+                attachments: [
+                    {filename: `Pass_${reservationCode}.pdf`, content: pdfBuffer, contentType: 'application/pdf'},
+                    {filename: `Invite_${reservationCode}.ics`, content: calendarInvite, contentType: 'text/calendar'}
+                ]
+            })
+        } catch(emailErr){
+            console.error('Pre-register email failed:', emailErr.message)
+        }
+
+        const populatedPass = await passModel.findById(pass._id).populate({
+            path: 'appointmentId',
+            populate: [
+                {path: 'visitorId'},
+                {path: 'hostId', select: 'name email'}
+            ]
+
+        })
+
+        res.status(201).json({
+            ...(populatedPass ? populatedPass.toObject() : pass.toObject()),
+            calendarInvite
+        })
+
+    }catch(error){
+        res.status(400).json({error: error.message})
+    }
+}
