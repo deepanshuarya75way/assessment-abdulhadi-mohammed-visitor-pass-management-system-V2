@@ -855,7 +855,7 @@ const handleDownloadICS = (icsContent, code) => {
                           {new Date(pass.createdAt).toLocaleDateString()}
                         </span>
                         {pass.reservationCode && (
-                          <span className="text-[11px] font-bold bg-indigo-700 border border-indigo-200 px-2 py-0.5 rounded"> 
+                          <span className="text-[11px] font-bold bg-indigo-700 border border-indigo-200 px-2 py-0.5 rounded text-white"> 
                           {pass.reservationCode}
                           </span>
                         )}
