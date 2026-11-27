@@ -110,7 +110,7 @@ const AdminDashboard = () => {
     if(!user) return
     const interval = setInterval(()=>{
       fetchPasses()
-    }, 5000)
+    }, 60000)
     return () => clearInterval(interval)
   },[user])
 
@@ -383,7 +383,7 @@ const handleDownloadICS = (icsContent, code) => {
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
-      {canApprove && setArrivalAlert && (
+      {canApprove && arrivalAlert && (
         <div className="mb-6 bg-emerald-600 text-white rounded-2xl p-4 shadow-md flex items-center justify-between gap-4">
           <div>
             <p>{arrivalAlert.name} {arrivalAlert.code ? `(${arrivalAlert.code})` : ""} has checked in.</p>
@@ -810,7 +810,7 @@ const handleDownloadICS = (icsContent, code) => {
                 <input 
                   type="text"
                   value ={searchQuery}
-                  onChange={(e) = setSearchQuery(e.target.value)}
+                  onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder = "Search by name, code, or phone..."
                   className="w-full sm:max-w-md px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-blue-500"
                 />
